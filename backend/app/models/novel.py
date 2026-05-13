@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, BigInteger, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -39,6 +39,7 @@ class NovelProject(Base):
     status: Mapped[str] = mapped_column(String(32), default="draft")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    cover_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
     owner: Mapped["User"] = relationship("User", back_populates="novel_projects")
     blueprint: Mapped[Optional["NovelBlueprint"]] = relationship(
@@ -194,11 +195,20 @@ class ChapterVersion(Base):
 
     id: Mapped[int] = mapped_column(BIGINT_PK_TYPE, primary_key=True, autoincrement=True)
     chapter_id: Mapped[int] = mapped_column(ForeignKey("chapters.id", ondelete="CASCADE"), nullable=False)
+    parent_version_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("chapter_versions.id", ondelete="SET NULL"), nullable=True
+    )
     version_label: Mapped[Optional[str]] = mapped_column(String(64))
     provider: Mapped[Optional[str]] = mapped_column(String(64))
     content: Mapped[str] = mapped_column(LONG_TEXT_TYPE, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(128), nullable=False, default="")
     metadata_: Mapped[Optional[dict]] = mapped_column("metadata", JSON)
     metadata = _MetadataAccessor()
+    generation_attempt: Mapped[int] = mapped_column(Integer, default=0)
+    retry_reason_codes: Mapped[Optional[dict]] = mapped_column(JSON)
+    retry_directive: Mapped[Optional[str]] = mapped_column(Text)
+    validation_summary: Mapped[Optional[dict]] = mapped_column(JSON)
+    needs_vector_retry: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     chapter: Mapped[Chapter] = relationship(
@@ -206,7 +216,13 @@ class ChapterVersion(Base):
         back_populates="versions",
         foreign_keys=[chapter_id],
     )
+    parent_version: Mapped[Optional["ChapterVersion"]] = relationship(
+        "ChapterVersion", remote_side=[id], foreign_keys=[parent_version_id]
+    )
     evaluations: Mapped[list["ChapterEvaluation"]] = relationship(
+        back_populates="version", cascade="all, delete-orphan"
+    )
+    reviews: Mapped[list["ChapterVersionReview"]] = relationship(
         back_populates="version", cascade="all, delete-orphan"
     )
 
@@ -226,3 +242,19 @@ class ChapterEvaluation(Base):
 
     chapter: Mapped[Chapter] = relationship(back_populates="evaluations")
     version: Mapped[Optional[ChapterVersion]] = relationship(back_populates="evaluations")
+
+
+class ChapterVersionReview(Base):
+    """绑定具体版本与其内容哈希的评审记录。"""
+
+    __tablename__ = "chapter_version_reviews"
+
+    id: Mapped[int] = mapped_column(BIGINT_PK_TYPE, primary_key=True, autoincrement=True)
+    chapter_version_id: Mapped[int] = mapped_column(ForeignKey("chapter_versions.id", ondelete="CASCADE"), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    is_stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    review_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload_json: Mapped[Optional[dict]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    version: Mapped[ChapterVersion] = relationship(back_populates="reviews")

@@ -37,6 +37,7 @@ class NovelRepository(BaseRepository[NovelProject]):
             .options(
                 selectinload(NovelProject.blueprint),
                 selectinload(NovelProject.outlines),
+                selectinload(NovelProject.characters),
                 selectinload(NovelProject.chapters).selectinload(Chapter.selected_version),
             )
         )

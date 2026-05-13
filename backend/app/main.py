@@ -91,6 +91,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 静态文件服务：封面图片（必须在 API 路由之前挂载）
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+
+COVER_STORAGE_DIR = Path(__file__).resolve().parents[1] / "storage" / "covers"
+COVER_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/api/covers", StaticFiles(directory=str(COVER_STORAGE_DIR)), name="covers")
+
+# API 路由
 app.include_router(api_router)
 
 
@@ -104,3 +113,4 @@ async def health_check():
         "app": settings.app_name,
         "version": "1.0.0",
     }
+

@@ -102,18 +102,39 @@ CREATE TABLE IF NOT EXISTS chapters (
 CREATE TABLE IF NOT EXISTS chapter_versions (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     chapter_id BIGINT NOT NULL,
+    parent_version_id BIGINT NULL,
     version_label VARCHAR(64) NULL,
     provider VARCHAR(64) NULL,
     content LONGTEXT NOT NULL,
+    content_hash VARCHAR(128) NOT NULL DEFAULT '',
     metadata JSON NULL,
+    generation_attempt INT DEFAULT 0,
+    retry_reason_codes JSON NULL,
+    retry_directive TEXT NULL,
+    validation_summary JSON NULL,
+    needs_vector_retry BOOLEAN DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT fk_versions_chapter FOREIGN KEY (chapter_id) REFERENCES chapters(id) ON DELETE CASCADE
+    CONSTRAINT fk_versions_chapter FOREIGN KEY (chapter_id) REFERENCES chapters(id) ON DELETE CASCADE,
+    CONSTRAINT fk_versions_parent FOREIGN KEY (parent_version_id) REFERENCES chapter_versions(id) ON DELETE SET NULL
 );
 
 ALTER TABLE chapters
     ADD CONSTRAINT fk_chapter_selected_version
     FOREIGN KEY (selected_version_id) REFERENCES chapter_versions(id)
     ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS chapter_version_reviews (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    chapter_version_id BIGINT NOT NULL,
+    content_hash VARCHAR(128) NOT NULL,
+    is_stale BOOLEAN NOT NULL DEFAULT 0,
+    review_type VARCHAR(64) NOT NULL,
+    payload_json JSON NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_reviews_version (chapter_version_id),
+    INDEX idx_reviews_version_stale (chapter_version_id, is_stale),
+    CONSTRAINT fk_reviews_version FOREIGN KEY (chapter_version_id) REFERENCES chapter_versions(id) ON DELETE CASCADE
+);
 
 CREATE TABLE IF NOT EXISTS chapter_evaluations (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -133,6 +154,39 @@ CREATE TABLE IF NOT EXISTS llm_configs (
     llm_provider_api_key TEXT NULL,
     llm_provider_model TEXT NULL,
     CONSTRAINT fk_llm_configs_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS project_memories (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    project_id CHAR(36) NOT NULL UNIQUE,
+    global_summary LONGTEXT NULL,
+    plot_arcs JSON NULL,
+    story_timeline_summary TEXT NULL,
+    last_updated_chapter INT DEFAULT 0,
+    version INT DEFAULT 1,
+    extra JSON NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    CONSTRAINT fk_project_memories_project FOREIGN KEY (project_id) REFERENCES novel_projects(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS chapter_snapshots (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    project_id CHAR(36) NOT NULL,
+    chapter_number INT NOT NULL,
+    version_id BIGINT NULL,
+    content_hash VARCHAR(128) NULL,
+    global_summary_snapshot LONGTEXT NULL,
+    character_states_snapshot JSON NULL,
+    plot_arcs_snapshot JSON NULL,
+    chapter_summary TEXT NULL,
+    word_count INT DEFAULT 0,
+    extra JSON NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_snapshot_project (project_id, chapter_number),
+    CONSTRAINT fk_snapshot_project FOREIGN KEY (project_id) REFERENCES novel_projects(id) ON DELETE CASCADE,
+    CONSTRAINT fk_snapshot_version FOREIGN KEY (version_id) REFERENCES chapter_versions(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS prompts (

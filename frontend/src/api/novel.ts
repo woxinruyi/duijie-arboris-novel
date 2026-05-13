@@ -58,6 +58,8 @@ export interface NovelProjectSummary {
   last_edited: string
   completed_chapters: number
   total_chapters: number
+  cover_url?: string
+  character_count?: number
 }
 
 export interface Blueprint {
@@ -257,6 +259,21 @@ export class NovelAPI {
     return request(NOVELS_BASE, {
       method: 'DELETE',
       body: JSON.stringify(projectIds)
+    })
+  }
+
+  static async generateCover(projectId: string): Promise<{ cover_url: string }> {
+    return request(`${NOVELS_BASE}/${projectId}/cover/generate`, {
+      method: 'POST'
+    })
+  }
+
+  static async uploadCover(projectId: string, file: File): Promise<{ cover_url: string }> {
+    const formData = new FormData()
+    formData.append('file', file)
+    return request(`${NOVELS_BASE}/${projectId}/cover/upload`, {
+      method: 'POST',
+      body: formData
     })
   }
 

@@ -10,21 +10,21 @@
  */
 export function formatDateTime(isoString: string | null | undefined): string {
   if (!isoString) return '-'
-  
+
   try {
     const date = new Date(isoString)
-    
+
     // 检查日期是否有效
     if (isNaN(date.getTime())) {
       return isoString
     }
-    
+
     const year = date.getFullYear()
     const month = String(date.getMonth() + 1).padStart(2, '0')
     const day = String(date.getDate()).padStart(2, '0')
     const hours = String(date.getHours()).padStart(2, '0')
     const minutes = String(date.getMinutes()).padStart(2, '0')
-    
+
     return `${year}年${month}月${day}日 ${hours}:${minutes}`
   } catch (error) {
     console.error('日期格式化错误:', error)
@@ -39,18 +39,18 @@ export function formatDateTime(isoString: string | null | undefined): string {
  */
 export function formatDate(isoString: string | null | undefined): string {
   if (!isoString) return '-'
-  
+
   try {
     const date = new Date(isoString)
-    
+
     if (isNaN(date.getTime())) {
       return isoString
     }
-    
+
     const year = date.getFullYear()
     const month = String(date.getMonth() + 1).padStart(2, '0')
     const day = String(date.getDate()).padStart(2, '0')
-    
+
     return `${year}年${month}月${day}日`
   } catch (error) {
     console.error('日期格式化错误:', error)
@@ -65,31 +65,35 @@ export function formatDate(isoString: string | null | undefined): string {
  */
 export function formatRelativeTime(isoString: string | null | undefined): string {
   if (!isoString) return '-'
-  
+
   try {
     const date = new Date(isoString)
     const now = new Date()
-    
+
     if (isNaN(date.getTime())) {
       return isoString
     }
-    
+
     const diffMs = now.getTime() - date.getTime()
     const diffSeconds = Math.floor(diffMs / 1000)
     const diffMinutes = Math.floor(diffSeconds / 60)
     const diffHours = Math.floor(diffMinutes / 60)
     const diffDays = Math.floor(diffHours / 24)
-    
+    const diffMonths = Math.floor(diffDays / 30)
+    const diffYears = Math.floor(diffDays / 365)
+
     if (diffSeconds < 60) {
       return '刚刚'
     } else if (diffMinutes < 60) {
       return `${diffMinutes}分钟前`
     } else if (diffHours < 24) {
       return `${diffHours}小时前`
-    } else if (diffDays < 7) {
+    } else if (diffDays < 30) {
       return `${diffDays}天前`
+    } else if (diffMonths < 12) {
+      return `${diffMonths}个月前`
     } else {
-      return formatDateTime(isoString)
+      return `${diffYears}年前`
     }
   } catch (error) {
     console.error('相对时间格式化错误:', error)

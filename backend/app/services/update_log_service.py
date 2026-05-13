@@ -1,4 +1,7 @@
 # AIMETA P=更新日志服务_日志业务逻辑|R=日志CRUD|NR=不含数据访问|E=UpdateLogService|X=internal|A=服务类|D=sqlalchemy|S=db|RD=./README.ai
+import os
+import subprocess
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import HTTPException, status
@@ -24,6 +27,7 @@ class UpdateLogService:
     async def create_log(self, content: str, creator: str | None = None, *, is_pinned: bool = False) -> UpdateLog:
         if is_pinned:
             await self._clear_pinned()
+        content = _append_git_summary(content)
         log = UpdateLog(content=content, created_by=creator, is_pinned=is_pinned)
         await self.repo.add(log)
         await self.session.commit()
@@ -59,3 +63,42 @@ class UpdateLogService:
 
     async def _clear_pinned(self) -> None:
         await self.session.execute(update(UpdateLog).values(is_pinned=False))
+
+
+def _append_git_summary(content: str) -> str:
+    summary = _get_git_summary()
+    if not summary:
+        return content
+    trimmed = content.rstrip()
+    if summary in trimmed:
+        return content
+    return f"{trimmed}\n\nGit版本摘要: {summary}"
+
+
+def _get_git_summary() -> Optional[str]:
+    env_summary = os.getenv("GIT_VERSION_SUMMARY")
+    if env_summary:
+        env_summary = env_summary.strip()
+        if env_summary:
+            return env_summary
+    repo_root = _find_repo_root(Path(__file__).resolve().parent)
+    if not repo_root:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "log", "-1", "--pretty=format:%h %s"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    summary = result.stdout.strip()
+    return summary or None
+
+
+def _find_repo_root(start: Path) -> Optional[Path]:
+    for parent in (start, *start.parents):
+        if (parent / ".git").exists():
+            return parent
+    return None

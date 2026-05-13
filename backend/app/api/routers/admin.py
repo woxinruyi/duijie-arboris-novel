@@ -195,6 +195,29 @@ async def get_novel_project_chapter(
     return await service.get_chapter_schema_for_admin(project_id, chapter_number)
 
 
+@router.post("/novel-projects/{project_id}/cover/generate")
+async def admin_generate_cover(
+    project_id: str,
+    session: AsyncSession = Depends(get_session),
+    _: None = Depends(get_current_admin),
+) -> dict:
+    """管理员为小说项目重新生成封面。"""
+    from ...services.cover_service import CoverService
+    from ...repositories.novel_repository import NovelRepository
+    
+    # 获取项目所有者ID
+    repo = NovelRepository(session)
+    project = await repo.get_by_id(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    
+    cover_service = CoverService(session)
+    # 使用项目所有者的ID进行生成（跳过权限检查）
+    cover_url = await cover_service.generate_cover(project_id, project.user_id)
+    logger.info("管理员为项目 %s 生成封面: %s", project_id, cover_url)
+    return {"cover_url": cover_url}
+
+
 @router.get("/prompts", response_model=List[PromptRead])
 async def list_prompts(
     service: PromptService = Depends(get_prompt_service),

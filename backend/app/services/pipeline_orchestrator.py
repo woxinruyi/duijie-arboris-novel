@@ -22,13 +22,11 @@ from ..services.consistency_service import ConsistencyService, ViolationSeverity
 from ..services.enhanced_writing_flow import EnhancedWritingFlow
 from ..services.enrichment_service import EnrichmentService
 from ..services.llm_service import LLMService
-from ..services.knowledge_retrieval_service import KnowledgeRetrievalService, FilteredContext
-from ..services.memory_layer_service import MemoryLayerService
 from ..services.novel_service import NovelService
 from ..services.preview_generation_service import PreviewGenerationService
 from ..services.prompt_service import PromptService
-from ..services.reader_simulator_service import ReaderSimulatorService, ReaderType
 from ..services.self_critique_service import CritiqueDimension, SelfCritiqueService
+from ..services.post_gen_validator import PostGenValidator
 from ..services.vector_store_service import VectorStoreService
 from ..services.writer_context_builder import WriterContextBuilder
 from ..utils.json_utils import remove_think_tags, unwrap_markdown_json
@@ -48,9 +46,7 @@ class PipelineConfig:
     enable_constitution: bool = False
     enable_persona: bool = False
     enable_six_dimension: bool = False
-    enable_reader_sim: bool = False
     enable_self_critique: bool = False
-    enable_memory: bool = False
     enable_rag: bool = True
     rag_mode: str = "simple"
     enable_foreshadowing: bool = False
@@ -67,6 +63,8 @@ class PipelineOrchestrator:
         self.novel_service = NovelService(session)
         self.context_builder = WriterContextBuilder()
         self.guardrails = ChapterGuardrails()
+        self.validator = PostGenValidator()
+        self._last_fallback_reason: Optional[str] = None
 
     async def generate_chapter(
         self,
@@ -155,41 +153,26 @@ class PipelineOrchestrator:
                 chapter_outline=outline_summary,
             )
 
-        memory_context = None
-        if config.enable_memory:
-            memory_context = await self._get_memory_context(
-                project_id=project_id,
-                chapter_number=chapter_number,
-                involved_characters=introduced_characters,
-            )
-
         project_memory_text = await self._get_project_memory_text(project_id)
+        memory_context = None
+
+        outline_constraints = getattr(config, "outline_constraints", {}) or {}
 
         rag_context = None
-        knowledge_context = None
         rag_stats = None
         if config.enable_rag:
-            if config.rag_mode == "two_stage":
-                knowledge_context, rag_stats = await self._get_two_stage_rag_context(
-                    project_id=project_id,
-                    chapter_number=chapter_number,
-                    writing_notes=writing_notes,
-                    pov_character=self._resolve_pov_character(chapter_mission),
-                    user_id=user_id,
-                )
-            else:
-                rag_context = await self._get_rag_context(
-                    project_id=project_id,
-                    outline_title=outline_title,
-                    outline_summary=outline_summary,
-                    writing_notes=writing_notes,
-                    user_id=user_id,
-                )
-                rag_stats = {
-                    "mode": "simple",
-                    "chunks": len(rag_context.get("chunks", [])) if rag_context else 0,
-                    "summaries": len(rag_context.get("summaries", [])) if rag_context else 0,
-                }
+            rag_context = await self._get_rag_context(
+                project_id=project_id,
+                outline_title=outline_title,
+                outline_summary=outline_summary,
+                writing_notes=writing_notes,
+                user_id=user_id,
+            )
+            rag_stats = {
+                "mode": "simple",
+                "chunks": len(rag_context.get("chunks", [])) if rag_context else 0,
+                "summaries": len(rag_context.get("summaries", [])) if rag_context else 0,
+            }
 
         writer_prompt = await self.prompt_service.get_prompt("writing_v2")
         if not writer_prompt:
@@ -203,13 +186,14 @@ class PipelineOrchestrator:
             previous_tail=history_context["previous_tail"],
             chapter_mission=chapter_mission,
             rag_context=rag_context,
-            knowledge_context=knowledge_context,
+            knowledge_context=None,
             outline_title=outline_title,
             outline_summary=outline_summary,
             writing_notes=writing_notes,
             forbidden_characters=forbidden_characters,
             project_memory_text=project_memory_text,
             memory_context=memory_context,
+            outline_constraints=outline_constraints,
         )
 
         if enhanced_flow and enhanced_context:
@@ -220,30 +204,43 @@ class PipelineOrchestrator:
 
         version_count = config.version_count
         version_style_hints = self._resolve_style_hints(enhanced_context, version_count)
+        writing_context = self._build_writing_context(
+            writer_blueprint=writer_blueprint,
+            forbidden_characters=forbidden_characters,
+            history_context=history_context,
+            outline_title=outline_title,
+            outline_summary=outline_summary,
+            outline_constraints=outline_constraints,
+            chapter_number=chapter_number,
+            chapter_mission=chapter_mission,
+        )
 
         versions: List[Dict[str, Any]] = []
         for idx in range(version_count):
             style_hint = version_style_hints[idx] if idx < len(version_style_hints) else None
-            versions.append(
-                await self._generate_single_version(
-                    index=idx,
-                    prompt_input=prompt_input,
-                    writer_prompt=writer_prompt,
-                    style_hint=style_hint,
-                    project_id=project_id,
-                    chapter_number=chapter_number,
-                    outline_title=outline_title,
-                    outline_summary=outline_summary,
-                    chapter_mission=chapter_mission,
-                    forbidden_characters=forbidden_characters,
-                    allowed_new_characters=allowed_new_characters,
-                    user_id=user_id,
-                    writer_blueprint=writer_blueprint,
-                    memory_context=memory_context,
-                    enhanced_context=enhanced_context,
-                    config=config,
-                )
+            generated = await self._generate_single_version(
+                index=idx,
+                prompt_input=prompt_input,
+                writer_prompt=writer_prompt,
+                style_hint=style_hint,
+                project_id=project_id,
+                chapter_number=chapter_number,
+                outline_title=outline_title,
+                outline_summary=outline_summary,
+                chapter_mission=chapter_mission,
+                forbidden_characters=forbidden_characters,
+                allowed_new_characters=allowed_new_characters,
+                user_id=user_id,
+                writer_blueprint=writer_blueprint,
+                memory_context=memory_context,
+                enhanced_context=enhanced_context,
+                config=config,
+                writing_context=writing_context,
+                outline_constraints=outline_constraints,
             )
+            if generated:
+                # Keep only the latest attempt per version; retry history is stored in metadata.
+                versions.append(generated[-1])
 
         best_version_index, ai_review_result = await self._run_ai_review(
             versions=versions,
@@ -258,6 +255,12 @@ class PipelineOrchestrator:
         if versions:
             best_version_index = max(0, min(best_version_index, len(versions) - 1))
         else:
+            best_version_index = 0
+
+        valid_indices = [idx for idx, v in enumerate(versions) if self._is_validation_accept(v)]
+        if valid_indices and best_version_index not in valid_indices:
+            best_version_index = valid_indices[0]
+        elif not valid_indices and versions:
             best_version_index = 0
 
         if versions:
@@ -286,15 +289,6 @@ class PipelineOrchestrator:
                 )
                 review_summaries["self_critique"] = critique_summary
 
-            if config.enable_reader_sim:
-                reader_feedback = await self._run_reader_simulation(
-                    best_content,
-                    chapter_number=chapter_number,
-                    previous_summary=history_context["previous_summary"],
-                    user_id=user_id,
-                )
-                review_summaries["reader_simulator"] = reader_feedback
-
             if config.enable_consistency:
                 best_content, consistency_report = await self._run_consistency_check(
                     project_id=project_id,
@@ -319,8 +313,19 @@ class PipelineOrchestrator:
             best_version.setdefault("metadata", {})["review_summaries"] = review_summaries
 
         contents = [v.get("content", "") for v in versions]
-        metadata = [v.get("metadata") for v in versions]
-        versions_models = await self.novel_service.replace_chapter_versions(chapter, contents, metadata)
+        metadata: List[Dict[str, Any]] = []
+        review_payloads: List[List[Dict[str, Any]]] = []
+        for v in versions:
+            meta = v.get("metadata") or {}
+            meta["lineage"] = v.get("lineage")
+            if v.get("validation"):
+                meta["validation"] = v.get("validation")
+            metadata.append(meta)
+            review_payloads.append([{"review_type": "validator", "payload": v.get("validation")}])
+
+        versions_models = await self.novel_service.replace_chapter_versions(
+            chapter, contents, metadata, reviews=review_payloads
+        )
 
         variants = []
         for idx, version_model in enumerate(versions_models):
@@ -329,6 +334,7 @@ class PipelineOrchestrator:
                 "version_id": version_model.id,
                 "content": versions[idx].get("content", ""),
                 "metadata": versions[idx].get("metadata"),
+                "validation": versions[idx].get("validation"),
             }
             variants.append(variant)
 
@@ -340,6 +346,10 @@ class PipelineOrchestrator:
             "variants": variants,
             "review_summaries": review_summaries,
             "debug_metadata": {
+                "context_stats": writing_context.get("context_stats"),
+                "requested_preset": flow_config.get("preset", "basic") if flow_config else "basic",
+                "effective_preset": config.preset,
+                "fallback_reason": getattr(self, "_last_fallback_reason", None),
                 "version_count": version_count,
                 "stages": self._build_stage_flags(config),
                 "retrieval_stats": rag_stats,
@@ -352,22 +362,23 @@ class PipelineOrchestrator:
 
         config = PipelineConfig(preset=preset)
         config.version_count = await self._resolve_version_count(flow_config.get("versions"))
+        fallback_reason = None
+        outline_constraints = flow_config.get("outline_constraints") if flow_config else {}
 
         if preset in ("enhanced", "ultimate"):
             config.enable_constitution = True
             config.enable_persona = True
             config.enable_foreshadowing = True
             config.enable_faction = True
-            config.rag_mode = "two_stage"
 
         if preset == "enhanced":
             config.enable_six_dimension = True
 
         if preset == "ultimate":
-            config.enable_memory = True
-
-        if preset == "basic":
-            config.enable_rag = True
+            logger.warning("Preset 'ultimate' is deprecated; falling back to basic pipeline.")
+            preset = "basic"
+            config.preset = "basic"
+            fallback_reason = "preset_ultimate_not_supported"
 
         for key in (
             "enable_preview",
@@ -380,8 +391,8 @@ class PipelineOrchestrator:
             if key in flow_config and flow_config[key] is not None:
                 setattr(config, key, bool(flow_config[key]))
 
-        if flow_config.get("rag_mode"):
-            config.rag_mode = str(flow_config["rag_mode"])
+        # Force canonical simple RAG
+        config.rag_mode = "simple"
 
         if preset == "ultimate":
             config.enable_preview = False
@@ -389,8 +400,12 @@ class PipelineOrchestrator:
             config.enable_consistency = False
             config.enable_enrichment = False
             config.enable_six_dimension = False
-            config.enable_reader_sim = False
             config.enable_self_critique = False
+
+        self._last_fallback_reason = fallback_reason
+
+        # attach outline constraints for downstream context
+        config.outline_constraints = outline_constraints  # type: ignore[attr-defined]
 
         return config
 
@@ -587,39 +602,6 @@ class PipelineOrchestrator:
             "summaries": rag_context.summary_lines() if rag_context.summaries else [],
         }
 
-    async def _get_two_stage_rag_context(
-        self,
-        *,
-        project_id: str,
-        chapter_number: int,
-        writing_notes: str,
-        pov_character: Optional[str],
-        user_id: int,
-    ) -> Tuple[Optional[str], Dict[str, Any]]:
-        if not settings.vector_store_enabled:
-            return None, {"mode": "two_stage", "enabled": False}
-
-        try:
-            vector_store = VectorStoreService()
-        except RuntimeError as exc:
-            logger.warning("向量库初始化失败，跳过两层 RAG: %s", exc)
-            return None, {"mode": "two_stage", "enabled": False, "error": str(exc)}
-
-        sync_session = getattr(self.session, "sync_session", self.session)
-        retrieval_service = KnowledgeRetrievalService(sync_session, self.llm_service, vector_store)
-        filtered = await retrieval_service.retrieve_and_filter(
-            project_id=project_id,
-            chapter_number=chapter_number,
-            user_id=user_id,
-            pov_character=pov_character,
-            user_guidance=writing_notes,
-            top_k=settings.vector_top_k_chunks,
-        )
-        context_text = self._format_filtered_context(filtered)
-        stats = filtered.stats or {}
-        stats["mode"] = "two_stage"
-        return context_text, stats
-
     async def _get_project_memory_text(self, project_id: str) -> Optional[str]:
         result = await self.session.execute(
             select(ProjectMemory).where(ProjectMemory.project_id == project_id)
@@ -637,16 +619,6 @@ class PipelineOrchestrator:
             return None
         return "\n\n".join(parts)
 
-    async def _get_memory_context(
-        self,
-        *,
-        project_id: str,
-        chapter_number: int,
-        involved_characters: List[str],
-    ) -> str:
-        memory_layer = MemoryLayerService(self.session, self.llm_service, self.prompt_service)
-        return await memory_layer.get_memory_context(project_id, chapter_number, involved_characters)
-
     @staticmethod
     def _build_prompt_sections(
         *,
@@ -662,14 +634,33 @@ class PipelineOrchestrator:
         forbidden_characters: List[str],
         project_memory_text: Optional[str],
         memory_context: Optional[str],
+        outline_constraints: Dict[str, Any],
     ) -> List[Tuple[str, str]]:
         blueprint_text = json.dumps(writer_blueprint, ensure_ascii=False, indent=2)
         mission_text = json.dumps(chapter_mission, ensure_ascii=False, indent=2) if chapter_mission else "无导演脚本"
         forbidden_text = json.dumps(forbidden_characters, ensure_ascii=False) if forbidden_characters else "无"
 
+        allowed_nodes = outline_constraints.get("allowed_outline_nodes") or []
+        forbidden_nodes = outline_constraints.get("forbidden_outline_nodes") or []
+        allowed_node_ids = [n.get("id") if isinstance(n, dict) else n for n in allowed_nodes]
+        forbidden_node_ids = [n.get("id") or n.get("node_id") if isinstance(n, dict) else n for n in forbidden_nodes]
+        forbidden_keywords = []
+        for node in forbidden_nodes:
+            if isinstance(node, dict):
+                forbidden_keywords.extend([kw for kw in (node.get("keywords") or []) if kw])
+
         sections: List[Tuple[str, str]] = [
             ("[世界蓝图](JSON，已裁剪)", blueprint_text),
         ]
+
+        if allowed_node_ids or forbidden_node_ids:
+            pacing_notes = [
+                f"仅允许推进的大纲节点: {allowed_node_ids or ['当前章节']}",
+                f"禁止推进的大纲节点: {forbidden_node_ids or ['无']}",
+            ]
+            if forbidden_keywords:
+                pacing_notes.append(f"避免出现这些推进关键词: {forbidden_keywords}")
+            sections.append(("[大纲节奏约束]", "\n".join(pacing_notes)))
 
         if project_memory_text:
             sections.append(("[项目长期记忆](摘要/剧情线)", project_memory_text))
@@ -701,6 +692,93 @@ class PipelineOrchestrator:
         )
 
         return sections
+
+    @staticmethod
+    def _build_writing_context(
+        *,
+        writer_blueprint: Dict[str, Any],
+        forbidden_characters: List[str],
+        history_context: Dict[str, Any],
+        outline_title: str,
+        outline_summary: str,
+        outline_constraints: Dict[str, Any],
+        chapter_number: int,
+        chapter_mission: Optional[dict],
+    ) -> Dict[str, Any]:
+        introduced_characters = []
+        for ch in writer_blueprint.get("characters", []):
+            name = ch.get("name")
+            if not name:
+                continue
+            introduced_characters.append(
+                {
+                    "name": name,
+                    "id": ch.get("id"),
+                    "aliases": ch.get("aliases") or [],
+                    "first_chapter": ch.get("first_chapter") or None,
+                }
+            )
+
+        known_facts = []
+        if history_context.get("previous_summary"):
+            known_facts.append(
+                {
+                    "fact_id": f"prev_summary_{chapter_number-1}",
+                    "text": history_context["previous_summary"],
+                    "entities": [],
+                }
+            )
+        if outline_summary:
+            known_facts.append(
+                {
+                    "fact_id": f"outline_{chapter_number}",
+                    "text": outline_summary,
+                    "entities": [],
+                }
+            )
+
+        forbidden_facts = [
+            {"fact_id": f"forbidden_{idx}", "text": name, "reason": "未登场角色"} for idx, name in enumerate(forbidden_characters)
+        ]
+
+        allowed_nodes = outline_constraints.get("allowed_outline_nodes") or [f"chapter-{chapter_number}"]
+        forbidden_nodes = outline_constraints.get("forbidden_outline_nodes") or []
+        pov_switch_allowed = bool(outline_constraints.get("pov_switch_allowed"))
+        allowed_pov_names = outline_constraints.get("allowed_pov_names") or []
+        ephemeral_roles_whitelist = outline_constraints.get("ephemeral_roles_whitelist") or ["店小二", "伙计", "路人", "侍女", "保安", "司机"]
+
+        pov = {
+            "pov_name": chapter_mission.get("pov") if chapter_mission else None,
+            "pov_role": chapter_mission.get("pov_role") if chapter_mission else None,
+            "knowledge_state": "basic",
+            "pov_switch_allowed": pov_switch_allowed,
+            "allowed_pov_names": allowed_pov_names,
+        }
+
+        context_stats = {
+            "known_facts_count": len(known_facts),
+            "forbidden_facts_count": len(forbidden_facts),
+            "introduced_characters_count": len(introduced_characters),
+            "outline_allowed_nodes": allowed_nodes,
+            "outline_forbidden_nodes": [n.get("id") or n.get("node_id") for n in forbidden_nodes],
+            "pov_switch_allowed": pov_switch_allowed,
+        }
+
+        return {
+            "pov": pov,
+            "introduced_characters": introduced_characters,
+            "known_facts": known_facts,
+            "forbidden_facts": forbidden_facts,
+            "outline_constraints": {
+                "allowed_outline_nodes": allowed_nodes,
+                "forbidden_outline_nodes": forbidden_nodes,
+                "pov_switch_allowed": pov_switch_allowed,
+                "allowed_pov_names": allowed_pov_names,
+                "ephemeral_roles_whitelist": ephemeral_roles_whitelist,
+            },
+            "ephemeral_roles_whitelist": ephemeral_roles_whitelist,
+            "context_stats": context_stats,
+        }
 
     @staticmethod
     def _resolve_style_hints(
@@ -742,12 +820,15 @@ class PipelineOrchestrator:
         memory_context: Optional[str],
         enhanced_context: Optional[Dict[str, Any]],
         config: PipelineConfig,
+        writing_context: Dict[str, Any],
+        outline_constraints: Dict[str, Any],
     ) -> Dict[str, Any]:
         metadata: Dict[str, Any] = {
             "chapter_mission": chapter_mission,
             "style_hint": style_hint,
             "pipeline": {"preset": config.preset},
         }
+        metadata["validation"] = {"attempts": []}
 
         content = ""
         if config.enable_preview:
@@ -813,11 +894,93 @@ class PipelineOrchestrator:
         if parsed_json is not None:
             metadata["parsed_json"] = parsed_json
 
-        return {
+        final_content = extracted_text or content
+        # Validation phase with retry (max 1), capturing lineage
+        variants: List[Dict[str, Any]] = []
+        validation_attempts = metadata["validation"]["attempts"]
+        ctx = {"pov": writing_context.get("pov"), **writing_context}
+
+        validation_result = self.validator.validate(final_content, context=ctx)
+        validation_attempts.append(
+            {
+                "ok": validation_result.ok,
+                "errors": [err.__dict__ for err in validation_result.errors],
+                "action": validation_result.action,
+                "retry_directive": validation_result.retry_directive,
+            }
+        )
+        # base variant
+        base_variant = {
             "index": index,
-            "content": extracted_text or content,
+            "content": final_content,
             "metadata": metadata,
+            "lineage": {
+                "label": f"{index}-a0",
+                "parent_label": None,
+                "generation_attempt": 0,
+                "retry_reason_codes": [err.code for err in validation_result.errors if err.severity == "BLOCK"],
+                "retry_directive": validation_result.retry_directive,
+            },
+            "validation": {
+                "ok": validation_result.ok,
+                "action": validation_result.action,
+                "errors": [err.__dict__ for err in validation_result.errors],
+                "retried": False,
+                "retry_directive": validation_result.retry_directive,
+            },
         }
+        variants.append(base_variant)
+
+        if not validation_result.ok and validation_result.action == "retry":
+            retry_prompt = final_prompt_input + "\n\n[修正指令]\n" + (validation_result.retry_directive or "")
+            response_retry = await self.llm_service.get_llm_response(
+                system_prompt=writer_prompt,
+                conversation_history=[{"role": "user", "content": retry_prompt}],
+                temperature=0.85,
+                user_id=user_id,
+                timeout=600.0,
+                response_format=None,
+            )
+            cleaned_retry = remove_think_tags(response_retry)
+            retry_content = unwrap_markdown_json(cleaned_retry)
+            retry_result = self.validator.validate(retry_content, context=ctx)
+            validation_attempts.append(
+                {
+                    "ok": retry_result.ok,
+                    "errors": [err.__dict__ for err in retry_result.errors],
+                    "action": retry_result.action,
+                    "retry_directive": retry_result.retry_directive,
+                }
+            )
+            retry_variant = {
+                "index": index,
+                "content": retry_content,
+                "metadata": metadata,
+                "lineage": {
+                    "label": f"{index}-a1",
+                    "parent_label": f"{index}-a0",
+                    "generation_attempt": 1,
+                    "retry_reason_codes": [err.code for err in validation_result.errors if err.severity == "BLOCK"],
+                    "retry_directive": validation_result.retry_directive,
+                },
+                "validation": {
+                    "ok": retry_result.ok,
+                    "action": retry_result.action,
+                    "errors": [err.__dict__ for err in retry_result.errors],
+                    "retried": True,
+                    "retry_directive": retry_result.retry_directive,
+                },
+            }
+            variants.append(retry_variant)
+
+        final_attempt = validation_attempts[-1] if validation_attempts else {
+            "ok": validation_result.ok,
+            "errors": [err.__dict__ for err in validation_result.errors],
+            "action": validation_result.action,
+        }
+        metadata["validation"]["final_status"] = final_attempt
+
+        return variants
 
     async def _generate_with_preview(
         self,
@@ -924,10 +1087,17 @@ class PipelineOrchestrator:
         chapter_mission: Optional[dict],
         user_id: int,
     ) -> Tuple[int, Optional[Dict[str, Any]]]:
-        if len(versions) <= 1:
+        valid_pairs = [
+            (idx, v)
+            for idx, v in enumerate(versions)
+            if self._is_validation_accept(v)
+        ]
+        if not valid_pairs:
             return 0, None
+        if len(valid_pairs) == 1:
+            return valid_pairs[0][0], None
 
-        contents = [v.get("content", "") for v in versions]
+        contents = [pair[1].get("content", "") for pair in valid_pairs]
         try:
             ai_review_service = AIReviewService(self.llm_service, self.prompt_service)
             ai_review_result = await ai_review_service.review_versions(
@@ -940,9 +1110,10 @@ class PipelineOrchestrator:
             return 0, None
 
         if not ai_review_result:
-            return 0, None
+            return valid_pairs[0][0], None
 
-        for idx, variant in enumerate(versions):
+        for idx, pair in enumerate(valid_pairs):
+            original_index, variant = pair
             variant.setdefault("metadata", {})["ai_review"] = {
                 "is_best": idx == ai_review_result.best_version_index,
                 "scores": ai_review_result.scores,
@@ -951,13 +1122,24 @@ class PipelineOrchestrator:
                 "suggestions": ai_review_result.refinement_suggestions if idx == ai_review_result.best_version_index else None,
             }
 
-        return ai_review_result.best_version_index, {
+        best_original_index = valid_pairs[ai_review_result.best_version_index][0]
+        return best_original_index, {
             "best_version_index": ai_review_result.best_version_index,
             "scores": ai_review_result.scores,
             "evaluation": ai_review_result.overall_evaluation,
             "flaws": ai_review_result.critical_flaws,
             "suggestions": ai_review_result.refinement_suggestions,
         }
+
+    @staticmethod
+    def _is_validation_accept(variant: Dict[str, Any]) -> bool:
+        val = variant.get("validation") or {}
+        if not val:
+            return True
+        action = val.get("action", "accept")
+        if val.get("ok", True) is False:
+            return False
+        return action == "accept"
 
     async def _run_self_critique(
         self,
@@ -985,23 +1167,6 @@ class PipelineOrchestrator:
             "improvement": critique.get("improvement", 0),
             "status": critique.get("status", "unknown"),
         }
-
-    async def _run_reader_simulation(
-        self,
-        chapter_content: str,
-        *,
-        chapter_number: int,
-        previous_summary: Optional[str],
-        user_id: int,
-    ) -> Dict[str, Any]:
-        service = ReaderSimulatorService(self.session, self.llm_service, self.prompt_service)
-        return await service.simulate_reading_experience(
-            chapter_content=chapter_content,
-            chapter_number=chapter_number,
-            reader_types=[ReaderType.THRILL_SEEKER, ReaderType.CRITIC, ReaderType.CASUAL],
-            previous_summary=previous_summary,
-            user_id=user_id,
-        )
 
     async def _run_consistency_check(
         self,
@@ -1123,34 +1288,9 @@ class PipelineOrchestrator:
             "constitution": config.enable_constitution,
             "persona": config.enable_persona,
             "six_dimension": config.enable_six_dimension,
-            "reader_sim": config.enable_reader_sim,
             "self_critique": config.enable_self_critique,
-            "memory": config.enable_memory,
             "rag": config.enable_rag,
-            "rag_mode": config.rag_mode == "two_stage",
+            "rag_mode": False,
         }
-
-    @staticmethod
-    def _format_filtered_context(filtered: FilteredContext) -> Optional[str]:
-        if not filtered:
-            return None
-
-        sections = []
-        if filtered.plot_fuel:
-            sections.append("## 情节燃料\n" + "\n".join(f"- {item}" for item in filtered.plot_fuel))
-        if filtered.character_info:
-            sections.append("## 人物维度\n" + "\n".join(f"- {item}" for item in filtered.character_info))
-        if filtered.world_fragments:
-            sections.append("## 世界碎片\n" + "\n".join(f"- {item}" for item in filtered.world_fragments))
-        if filtered.narrative_techniques:
-            sections.append("## 叙事技法\n" + "\n".join(f"- {item}" for item in filtered.narrative_techniques))
-        if filtered.warnings:
-            sections.append("## 冲突警告\n" + "\n".join(f"- {item}" for item in filtered.warnings))
-
-        if not sections:
-            return "（未检索到有效上下文）"
-
-        return "\n\n".join(sections)
-
 
 __all__ = ["PipelineOrchestrator", "PipelineConfig"]

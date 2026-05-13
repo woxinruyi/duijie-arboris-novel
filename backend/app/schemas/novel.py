@@ -105,6 +105,8 @@ class NovelProjectSummary(BaseModel):
     last_edited: str
     completed_chapters: int
     total_chapters: int
+    cover_url: Optional[str] = None
+    character_count: int = 0
 
 
 class BlueprintGenerationResponse(BaseModel):
@@ -160,6 +162,7 @@ class AdvancedGenerateVariant(BaseModel):
     version_id: int
     content: str
     metadata: Optional[Dict[str, Any]] = None
+    validation: Optional[Dict[str, Any]] = None
 
 
 class AdvancedGenerateResponse(BaseModel):
@@ -170,6 +173,7 @@ class AdvancedGenerateResponse(BaseModel):
     variants: List[AdvancedGenerateVariant]
     review_summaries: Dict[str, Any] = Field(default_factory=dict)
     debug_metadata: Optional[Dict[str, Any]] = None
+    finalized: bool = Field(default=False, description="是否已定稿，生成阶段恒为 False")
 
 
 class FinalizeChapterRequest(BaseModel):
@@ -183,6 +187,19 @@ class FinalizeChapterResponse(BaseModel):
     chapter_number: int
     selected_version_id: int
     result: Dict[str, Any]
+
+
+class VectorRetryRequest(BaseModel):
+    project_id: str
+    chapter_number: int
+    version_id: int
+
+
+class VectorRetryResponse(BaseModel):
+    project_id: str
+    chapter_number: int
+    version_id: int
+    status: Dict[str, Any]
 
 
 class SelectVersionRequest(BaseModel):

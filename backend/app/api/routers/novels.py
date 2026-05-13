@@ -339,3 +339,48 @@ async def patch_blueprint(
     await novel_service.patch_blueprint(project_id, update_data)
     logger.info("项目 %s 局部更新蓝图字段：%s", project_id, list(update_data.keys()))
     return await novel_service.get_project_schema(project_id, current_user.id)
+
+
+@router.post("/{project_id}/cover/generate")
+async def generate_cover(
+    project_id: str,
+    session: AsyncSession = Depends(get_session),
+    current_user: UserInDB = Depends(get_current_user),
+) -> Dict[str, str]:
+    """为小说项目生成封面图片。"""
+    from ...services.cover_service import CoverService
+    
+    cover_service = CoverService(session)
+    cover_url = await cover_service.generate_cover(project_id, current_user.id)
+    logger.info("项目 %s 生成封面成功: %s", project_id, cover_url)
+    return {"cover_url": cover_url}
+
+
+@router.post("/{project_id}/cover/upload")
+async def upload_cover(
+    project_id: str,
+    file: UploadFile,
+    session: AsyncSession = Depends(get_session),
+    current_user: UserInDB = Depends(get_current_user),
+) -> Dict[str, str]:
+    """上传自定义封面图片。"""
+    from ...services.cover_service import CoverService
+    
+    # 验证文件类型
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="只能上传图片文件")
+        
+    # 读取文件内容
+    content = await file.read()
+    
+    # 验证文件大小 (5MB limit is enforced by frontend, but good to check here too if needed, 
+    # though reading it into memory already happened. Nginx/Uvicorn limits might apply first)
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="图片文件不能超过 5MB")
+
+    cover_service = CoverService(session)
+    cover_url = await cover_service.save_uploaded_cover(project_id, content)
+    
+    logger.info("项目 %s 上传封面成功: %s", project_id, cover_url)
+    return {"cover_url": cover_url}
+

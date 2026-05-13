@@ -180,10 +180,31 @@ class Settings(BaseSettings):
     email_from: Optional[str] = Field(default=None, env="EMAIL_FROM", description="邮件发送方显示名或邮箱")
 
     model_config = SettingsConfigDict(
-        env_file=("new-backend/.env", ".env", "backend/.env"),
+        # 优先使用实际部署的 .env，其次兼容旧的默认配置文件
+        env_file=("backend/.env", ".env", "new-backend/.env"),
         env_file_encoding="utf-8",
         extra="ignore"
     )
+
+    @staticmethod
+    def _none_if_blank(value: Optional[str]) -> Optional[str]:
+        """将空字符串归一化为 None，避免 Optional URL 字段校验失败。"""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @validator(
+        "openai_base_url",
+        "embedding_base_url",
+        "linuxdo_redirect_uri",
+        "linuxdo_auth_url",
+        "linuxdo_token_url",
+        "linuxdo_user_info_url",
+        pre=True,
+    )
+    def _normalize_optional_urls(cls, value: Optional[str]) -> Optional[str]:
+        """允许留空的可选 URL 配置自动视为未设置。"""
+        return cls._none_if_blank(value)
 
     @validator("database_url", pre=True, always=True)
     def _normalize_database_url(cls, value: Optional[str]) -> Optional[str]:

@@ -117,6 +117,7 @@
             @detail="viewProjectDetail"
             @continue="enterProject"
             @delete="handleDeleteProject"
+            @cover-generated="handleCoverGenerated"
           />
 
           <!-- Create New Project Card -->
@@ -342,6 +343,15 @@ const confirmDelete = async () => {
     }, 3000)
   } finally {
     isDeleting.value = false
+  }
+}
+
+// 封面生成回调
+const handleCoverGenerated = (data: { id: string, cover_url: string }) => {
+  // Update the project's cover_url in the store
+  const project = novelStore.projects.find(p => p.id === data.id)
+  if (project) {
+    project.cover_url = data.cover_url
   }
 }
 

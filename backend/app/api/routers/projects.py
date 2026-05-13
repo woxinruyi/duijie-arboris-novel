@@ -13,7 +13,6 @@ from ...schemas.user import UserInDB
 from ...services.constitution_service import ConstitutionService
 from ...services.faction_service import FactionService
 from ...services.llm_service import LLMService
-from ...services.memory_layer_service import MemoryLayerService
 from ...services.novel_service import NovelService
 from ...services.prompt_service import PromptService
 from ...services.writer_persona_service import WriterPersonaService
@@ -197,23 +196,14 @@ async def get_character_states(
     session: AsyncSession = Depends(get_session),
     current_user: UserInDB = Depends(get_current_user),
 ) -> Dict[str, Any]:
-    novel_service = NovelService(session)
-    await novel_service.ensure_project_owner(project_id, current_user.id)
-
-    if chapter_number is None:
-        result = await session.execute(
-            select(Chapter.chapter_number).where(Chapter.project_id == project_id)
-        )
-        chapter_numbers = [row[0] for row in result.all()]
-        chapter_number = max(chapter_numbers) if chapter_numbers else 0
-
-    memory_service = MemoryLayerService(session, LLMService(session), PromptService(session))
-    states = await memory_service.get_all_character_states(project_id, chapter_number)
-    return {
-        "project_id": project_id,
-        "chapter_number": chapter_number,
-        "states": [_model_to_dict(state) for state in states],
-    }
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "error": "FEATURE_DEPRECATED",
+            "message": "Character state API is deprecated in unified pipeline",
+            "replacement": None,
+        },
+    )
 
 
 @router.get("/{project_id}/factions")

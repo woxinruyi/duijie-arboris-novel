@@ -93,6 +93,8 @@ from ..models import (
     NovelConversation,
     NovelProject,
 )
+from ..services.chapter_version_review_service import ChapterVersionReviewService
+from ..utils.text_utils import compute_content_hash, normalize_content
 from ..repositories.novel_repository import NovelRepository
 from ..schemas.admin import AdminNovelSummary
 from ..schemas.novel import (
@@ -168,6 +170,7 @@ class NovelService:
             genre = blueprint.genre if blueprint and blueprint.genre else "未知"
             outlines = project.outlines
             chapters = project.chapters
+            characters = project.characters
             total = len(outlines) or len(chapters)
             completed = sum(1 for chapter in chapters if chapter.selected_version_id)
             summaries.append(
@@ -178,6 +181,8 @@ class NovelService:
                     last_edited=project.updated_at.isoformat() if project.updated_at else "未知",
                     completed_chapters=completed,
                     total_chapters=total,
+                    cover_url=project.cover_url,
+                    character_count=len(characters),
                 )
             )
         return summaries
@@ -440,21 +445,76 @@ class NovelService:
         await self.session.refresh(chapter)
         return chapter
 
-    async def replace_chapter_versions(self, chapter: Chapter, contents: List[str], metadata: Optional[List[Dict]] = None) -> List[ChapterVersion]:
-        await self.session.execute(delete(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id))
+    async def replace_chapter_versions(
+        self,
+        chapter: Chapter,
+        contents: List[str],
+        metadata: Optional[List[Dict]] = None,
+        reviews: Optional[List[List[Dict[str, Any]]]] = None,
+    ) -> List[ChapterVersion]:
+        """Append-only creation of chapter versions with review binding."""
         versions: List[ChapterVersion] = []
+        label_to_version: Dict[str, ChapterVersion] = {}
+        review_service = ChapterVersionReviewService(self.session)
+
+        existing_versions_stmt = select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.created_at)
+        existing_versions_result = await self.session.execute(existing_versions_stmt)
+        existing_versions = existing_versions_result.scalars().all()
+        for old_version in existing_versions:
+            meta = old_version.metadata or {}
+            if not meta.get("archived"):
+                new_meta = dict(meta)
+                new_meta["archived"] = True
+                old_version.metadata = new_meta
+
+        existing_count = len(existing_versions)
+
         for index, content in enumerate(contents):
-            extra = metadata[index] if metadata and index < len(metadata) else None
-            text_content = _normalize_version_content(content, extra)
+            extra = metadata[index] if metadata and index < len(metadata) else {}
+            text_content = normalize_content(_normalize_version_content(content, extra))
+            lineage = extra.get("lineage") or {}
+            validation_summary = extra.get("validation") or extra.get("validation_summary")
+            content_hash = compute_content_hash(text_content)
+
             version = ChapterVersion(
                 chapter_id=chapter.id,
                 content=text_content,
-                metadata=extra,  # ✅ 落盘 metadata
-                version_label=f"v{index+1}",
+                content_hash=content_hash,
+                metadata=extra,  # 保留完整 metadata
+                version_label=extra.get("version_label") or f"v{existing_count + index + 1}",
+                generation_attempt=int(lineage.get("generation_attempt", 0)),
+                retry_reason_codes=lineage.get("retry_reason_codes"),
+                retry_directive=lineage.get("retry_directive"),
+                validation_summary=validation_summary,
             )
             self.session.add(version)
+            await self.session.flush()
             versions.append(version)
+
+            label = lineage.get("label")
+            if label:
+                label_to_version[label] = version
+            parent_label = lineage.get("parent_label")
+            if parent_label and parent_label in label_to_version:
+                version.parent_version_id = label_to_version[parent_label].id
+
+            await review_service.mark_stale_for_other_versions(
+                chapter_id=chapter.id,
+                new_hash=content_hash,
+                exclude_version_id=version.id,
+            )
+            review_payloads = reviews[index] if reviews and index < len(reviews) else None
+            if not review_payloads and validation_summary is not None:
+                review_payloads = [{"review_type": "validator", "payload": validation_summary}]
+            if review_payloads:
+                await review_service.bulk_create_reviews(
+                    version_id=version.id,
+                    content_hash=content_hash,
+                    reviews=review_payloads,
+                )
+
         chapter.status = ChapterGenerationStatus.WAITING_FOR_CONFIRM.value
+        chapter.selected_version_id = None
         await self.session.commit()
         await self.session.refresh(chapter)
         await self._touch_project(chapter.project_id)
@@ -463,7 +523,7 @@ class NovelService:
     async def select_chapter_version(self, chapter: Chapter, version_index: int) -> ChapterVersion:
         stmt = select(ChapterVersion).where(ChapterVersion.chapter_id == chapter.id).order_by(ChapterVersion.created_at)
         result = await self.session.execute(stmt)
-        versions = result.scalars().all()
+        versions = [v for v in result.scalars().all() if not ((v.metadata or {}).get("archived"))]
         
         if not versions or version_index < 0 or version_index >= len(versions):
             raise HTTPException(status_code=400, detail="版本索引无效")
@@ -489,6 +549,14 @@ class NovelService:
             decision=decision,
         )
         self.session.add(evaluation)
+        if version and version.content_hash:
+            review_service = ChapterVersionReviewService(self.session)
+            await review_service.create_review(
+                version_id=version.id,
+                content_hash=version.content_hash,
+                review_type=decision or "manual_review",
+                payload={"feedback": feedback, "decision": decision},
+            )
         chapter.status = ChapterGenerationStatus.WAITING_FOR_CONFIRM.value
         await self.session.commit()
         await self.session.refresh(chapter)

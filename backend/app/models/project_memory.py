@@ -85,6 +85,10 @@ class ChapterSnapshot(Base):
         index=True
     )
     chapter_number: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    version_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("chapter_versions.id", ondelete="SET NULL"), nullable=True
+    )
+    content_hash: Mapped[Optional[str]] = mapped_column(String(128))
     
     # 章节定稿时的全局摘要快照
     global_summary_snapshot: Mapped[Optional[str]] = mapped_column(LONG_TEXT_TYPE)

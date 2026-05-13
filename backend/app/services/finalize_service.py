@@ -23,6 +23,8 @@ from ..models.novel import Chapter, ChapterVersion, NovelProject
 from ..models.chapter_blueprint import ChapterBlueprint
 from .llm_service import LLMService
 from .vector_store_service import VectorStoreService
+from .chapter_ingest_service import ChapterIngestionService
+from ..utils.text_utils import compute_content_hash
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +161,8 @@ class FinalizeService:
         chapter_number: int,
         chapter_text: str,
         user_id: int,
-        skip_vector_update: bool = False
+        skip_vector_update: bool = False,
+        chapter_version_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         对指定章节执行定稿处理
@@ -170,6 +173,7 @@ class FinalizeService:
             chapter_text: 章节正文
             user_id: 用户ID
             skip_vector_update: 是否跳过向量库更新
+            chapter_version_id: 当前定稿的章节版本ID
             
         Returns:
             包含更新结果的字典
@@ -218,24 +222,30 @@ class FinalizeService:
                 project_memory.plot_arcs = new_plot_arcs
                 result["updates"]["plot_arcs"] = "updated"
             
-            # 5. 更新向量库
+            # 5. 更新向量库（失败时返回状态供补偿）
             if not skip_vector_update and self.vector_store_service:
-                await self._update_vector_store(
+                vector_status = await self._update_vector_store(
                     project_id=project_id,
                     chapter_number=chapter_number,
-                    chapter_text=chapter_text
+                    chapter_text=chapter_text,
+                    user_id=user_id,
                 )
-                result["updates"]["vector_store"] = "updated"
-            
+                result["updates"]["vector_store"] = vector_status
+                if vector_status.get("status") != "updated":
+                    result["needs_vector_retry"] = True
+
             # 6. 创建章节快照
             chapter_summary = await self._generate_chapter_summary(
                 chapter_text=chapter_text,
                 chapter_number=chapter_number,
                 user_id=user_id
             )
+            content_hash = compute_content_hash(chapter_text)
             await self._create_chapter_snapshot(
                 project_id=project_id,
                 chapter_number=chapter_number,
+                version_id=chapter_version_id,
+                content_hash=content_hash,
                 global_summary=new_summary or project_memory.global_summary,
                 character_states=new_state,
                 plot_arcs=new_plot_arcs or project_memory.plot_arcs,
@@ -427,21 +437,30 @@ class FinalizeService:
         self,
         project_id: str,
         chapter_number: int,
-        chapter_text: str
-    ):
-        """更新向量库"""
+        chapter_text: str,
+        user_id: int,
+    ) -> Dict[str, str]:
+        """更新向量库，返回状态字典而非静默失败。"""
         if not self.vector_store_service:
-            return
-        
+            return {"status": "skipped", "reason": "vector_store_disabled"}
+
         try:
-            # 将章节文本分块并存入向量库
-            await self.vector_store_service.add_chapter_to_store(
+            ingest_service = ChapterIngestionService(
+                llm_service=self.llm_service,
+                vector_store=self.vector_store_service,
+            )
+            await ingest_service.ingest_chapter(
                 project_id=project_id,
                 chapter_number=chapter_number,
-                content=chapter_text
+                title=f"第{chapter_number}章",
+                content=chapter_text,
+                summary=None,
+                user_id=user_id,
             )
-        except Exception as e:
-            logger.error(f"更新向量库失败: {e}")
+            return {"status": "updated"}
+        except Exception as exc:
+            logger.error("更新向量库失败: %s", exc)
+            return {"status": "failed", "error": str(exc)}
     
     async def _generate_chapter_summary(
         self,
@@ -471,6 +490,8 @@ class FinalizeService:
         self,
         project_id: str,
         chapter_number: int,
+        version_id: Optional[int],
+        content_hash: Optional[str],
         global_summary: Optional[str],
         character_states: Optional[str],
         plot_arcs: Optional[Dict],
@@ -481,6 +502,8 @@ class FinalizeService:
         snapshot = ChapterSnapshot(
             project_id=project_id,
             chapter_number=chapter_number,
+            version_id=version_id,
+            content_hash=content_hash,
             global_summary_snapshot=global_summary,
             character_states_snapshot={"raw_text": character_states} if character_states else None,
             plot_arcs_snapshot=plot_arcs,

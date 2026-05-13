@@ -18,13 +18,12 @@ from .consistency_service import ConsistencyService, ConsistencyCheckResult, Con
 from .knowledge_retrieval_service import KnowledgeRetrievalService, FilteredContext, RetrievedKnowledge
 from .enrichment_service import EnrichmentService, EnrichmentResult
 from .blueprint_service import BlueprintService
-from .vector_store_service_ext import VectorStoreServiceExt
+from .vector_retry_service import VectorRetryService
 
 __all__ = [
     # 基础服务
     "LLMService",
     "VectorStoreService",
-    "VectorStoreServiceExt",
     "EmbeddingService",
     "RetrievedChunk",
     "RetrievedSummary",
@@ -40,4 +39,5 @@ __all__ = [
     "EnrichmentService",
     "EnrichmentResult",
     "BlueprintService",
+    "VectorRetryService",
 ]
